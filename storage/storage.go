@@ -39,3 +39,12 @@ func (s *Storage) Load(filename string) error {
 func (s *Storage) GetBooks() ([]Book, error) {
 	return s.booksData, nil
 }
+
+func (s *Storage) GetBookByID(id string) (Book, error) {
+	for _, book := range s.booksData {
+		if book.ID == id {
+			return book, nil
+		}
+	}
+	return Book{}, fmt.Errorf("book not found")
+}
