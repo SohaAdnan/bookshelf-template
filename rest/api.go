@@ -3,11 +3,10 @@ package rest
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"github.com/ilhamsyahids/bookshelf-template/storage"
 	"github.com/ilhamsyahids/bookshelf-template/utils"
 )
@@ -31,9 +30,13 @@ func (api *API) GetHandler() http.Handler {
 
 	r.Get("/books", api.serveGetBooks)
 
-	r.Get("/books/:id", api.serveGetBooksByID)
+	r.Get("/books/:id", api.serveGetBookByID)
 
 	r.Post("/books", api.serveCreateBook)
+
+	r.Put("/books/:id", api.serveUpdateBook)
+
+	r.Delete("/books/:id", api.serveDeleteBook)
 
 	return r
 }
@@ -59,29 +62,115 @@ func (api *API) serveGetBooks(w http.ResponseWriter, r *http.Request) {
 	w.Write(buf.Bytes())
 }
 
-type addBookReq struct {
-	ISBN      string `json:"isbn" validate:"nonzero"`
-	Title     string `json:"title"`
-	Author    string `json:"author"`
-	Published string `json:"published"`
-}
+func (api *API) serveGetBookByID(w http.ResponseWriter, r *http.Request) {
+	bookID := chi.URLParam(r, "id")
 
-func (addNew *addBookReq) Bind(r *http.Request) error {
-	err := validator.Validate(addNew)
-	fmt.Println(err)
+	book, err := api.bookStorage.GetBookByID(bookID)
 	if err != nil {
-		return err
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(err.Error()))
+		return
 	}
-	return nil
+
+	// Output success response with the book
+	buf := new(bytes.Buffer)
+	encoder := json.NewEncoder(buf)
+	encoder.Encode(utils.NewSuccessResp(book))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(buf.Bytes())
 }
 
 func (api *API) serveCreateBook(w http.ResponseWriter, r *http.Request) {
-	newReq := &addBookReq{}
-	err := render.Bind(r, newReq)
+	// Parse the incoming request body
+	var newBook storage.Book
+	err := json.NewDecoder(r.Body).Decode(&newBook)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
 	}
-	fmt.Printf("New Request: %v\n", newReq)
+
+	// Generate a new ID for the book
+	newBook.ID = uuid.New().String()
+
+	// Add the new book to the storage
+	err = api.bookStorage.AddBook(newBook)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	// Return success response with the created book
+	buf := new(bytes.Buffer)
+	encoder := json.NewEncoder(buf)
+	encoder.Encode(utils.NewSuccessResp(newBook))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write(buf.Bytes())
+}
+
+func (api *API) serveUpdateBook(w http.ResponseWriter, r *http.Request) {
+	bookID := chi.URLParam(r, "id")
+
+	// Parse the request body
+	updateRequest := &storage.Book{}
+	if err := json.NewDecoder(r.Body).Decode(updateRequest); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	// Retrieve the book from storage
+	book, err := api.bookStorage.GetBookByID(bookID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	// Update the book fields if the corresponding fields in the update request are not empty
+	if updateRequest.ISBN != "" {
+		book.ISBN = updateRequest.ISBN
+	}
+	if updateRequest.Title != "" {
+		book.Title = updateRequest.Title
+	}
+	if updateRequest.Author != "" {
+		book.Author = updateRequest.Author
+	}
+	if updateRequest.Published != "" {
+		book.Published = updateRequest.Published
+	}
+
+	// Update the book in storage
+	// (assuming you have a method `UpdateBookByID` in the `storage` package)
+	err = api.bookStorage.UpdateBookByID(bookID, book)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	// Output success response
+	buf := new(bytes.Buffer)
+	encoder := json.NewEncoder(buf)
+	encoder.Encode(utils.NewSuccessResp(book))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(buf.Bytes())
+}
+
+func (api *API) serveDeleteBook(w http.ResponseWriter, r *http.Request) {
+	bookID := chi.URLParam(r, "id")
+
+	err := api.bookStorage.DeleteBookByID(bookID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }

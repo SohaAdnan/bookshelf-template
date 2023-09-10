@@ -40,6 +40,11 @@ func (s *Storage) GetBooks() ([]Book, error) {
 	return s.booksData, nil
 }
 
+func (s *Storage) AddBook(book Book) error {
+	s.booksData = append(s.booksData, book)
+	return nil
+}
+
 func (s *Storage) GetBookByID(id string) (Book, error) {
 	for _, book := range s.booksData {
 		if book.ID == id {
@@ -47,4 +52,25 @@ func (s *Storage) GetBookByID(id string) (Book, error) {
 		}
 	}
 	return Book{}, fmt.Errorf("book not found")
+}
+
+func (s *Storage) UpdateBookByID(id string, book Book) error {
+	for i, b := range s.booksData {
+		if b.ID == id {
+			// Update the book at the given index
+			s.booksData[i] = book
+			return nil
+		}
+	}
+	return fmt.Errorf("book not found")
+}
+
+func (s *Storage) DeleteBookByID(id string) error {
+	for i, book := range s.booksData {
+		if book.ID == id {
+			s.booksData = append(s.booksData[:i], s.booksData[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("book not found")
 }
