@@ -1,10 +1,12 @@
 package storage
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
+
+	"github.com/jmoiron/sqlx"
 )
+
+var BookNotFound = fmt.Errorf("book not found")
 
 type Book struct {
 	ID        string `json:"id"`
@@ -15,62 +17,100 @@ type Book struct {
 }
 
 type Storage struct {
-	booksData []Book
+	sqlClient *sqlx.DB
 }
 
-func NewStorage() *Storage {
-	return &Storage{}
+func NewStorage(sqlClient *sqlx.DB) *Storage {
+	return &Storage{sqlClient: sqlClient}
 }
 
-func (s *Storage) Load(filename string) error {
-	rawBook, err := ioutil.ReadFile(filename)
+func (s *Storage) GetBooks(query string, page, limit int) ([]Book, error) {
+	// get books from database
+	books := []Book{}
+	sqlQuery := `SELECT * FROM books WHERE title LIKE ? LIMIT ? OFFSET ?`
+	err := s.sqlClient.Select(&books, sqlQuery, "%"+query+"%", limit, (page - 1))
 	if err != nil {
-		return fmt.Errorf("unable to read file due: %v", err)
+		return nil, err
 	}
+	return books, nil
+}
 
-	err = json.Unmarshal(rawBook, &s.booksData)
+func (s *Storage) CreateBook(book Book) (*Book, error) {
+	// insert book to database
+	sqlQuery := `INSERT INTO books (isbn, title, author, published) VALUES (?, ?, ?, ?)`
+	res, err := s.sqlClient.Exec(sqlQuery, book.ISBN, book.Title, book.Author, book.Published)
 	if err != nil {
-		return fmt.Errorf("unable to init books data due: %v", err)
+		return nil, err
 	}
 
+	// get last inserted id
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	// set id to book
+	book.ID = fmt.Sprintf("%d", id)
+
+	return &book, nil
+}
+
+func (s *Storage) GetBookByID(id string) (*Book, error) {
+	// get book from database
+	book := Book{}
+	sqlQuery := `SELECT * FROM books WHERE id = ?`
+	err := s.sqlClient.Get(&book, sqlQuery, id)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return nil, BookNotFound
+		}
+		return nil, err
+	}
+	return &book, nil
+}
+
+func (s *Storage) UpdateBook(id string, book Book) (*Book, error) {
+	// update book from database
+	sqlQuery := `UPDATE books SET`
+	args := []interface{}{}
+	if book.ISBN != "" {
+		sqlQuery += ` isbn = ?,`
+		args = append(args, book.ISBN)
+	}
+	if book.Title != "" {
+		sqlQuery += ` title = ?,`
+		args = append(args, book.Title)
+	}
+	if book.Author != "" {
+		sqlQuery += ` author = ?,`
+		args = append(args, book.Author)
+	}
+	if book.Published != "" {
+		sqlQuery += ` published = ?,`
+		args = append(args, book.Published)
+	}
+
+	// remove last comma
+	sqlQuery = sqlQuery[:len(sqlQuery)-1]
+
+	// add where clause
+	sqlQuery += ` WHERE id = ?`
+	args = append(args, id)
+
+	_, err := s.sqlClient.Exec(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// get updated book
+	return s.GetBookByID(id)
+}
+
+func (s *Storage) DeleteBook(id string) error {
+	// delete book from database
+	sqlQuery := `DELETE FROM books WHERE id = ?`
+	_, err := s.sqlClient.Exec(sqlQuery, id)
+	if err != nil {
+		return err
+	}
 	return nil
-}
-
-func (s *Storage) GetBooks() ([]Book, error) {
-	return s.booksData, nil
-}
-
-func (s *Storage) AddBook(book Book) error {
-	s.booksData = append(s.booksData, book)
-	return nil
-}
-
-func (s *Storage) GetBookByID(id string) (Book, error) {
-	for _, book := range s.booksData {
-		if book.ID == id {
-			return book, nil
-		}
-	}
-	return Book{}, fmt.Errorf("book not found")
-}
-
-func (s *Storage) UpdateBookByID(id string, book Book) error {
-	for i, b := range s.booksData {
-		if b.ID == id {
-			// Update the book at the given index
-			s.booksData[i] = book
-			return nil
-		}
-	}
-	return fmt.Errorf("book not found")
-}
-
-func (s *Storage) DeleteBookByID(id string) error {
-	for i, book := range s.booksData {
-		if book.ID == id {
-			s.booksData = append(s.booksData[:i], s.booksData[i+1:]...)
-			return nil
-		}
-	}
-	return fmt.Errorf("book not found")
 }
