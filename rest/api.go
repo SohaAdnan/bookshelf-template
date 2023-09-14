@@ -1,14 +1,16 @@
 package rest
 
 import (
-	"bytes"
-	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	"github.com/go-chi/render"
 	"github.com/ilhamsyahids/bookshelf-template/storage"
 	"github.com/ilhamsyahids/bookshelf-template/utils"
+	"gopkg.in/validator.v2"
 )
 
 type API struct {
@@ -16,10 +18,15 @@ type API struct {
 }
 
 type APIConfig struct {
-	BookStorage storage.Storage
+	BookStorage storage.Storage `validate:"nonnil"`
 }
 
 func NewAPI(config APIConfig) (*API, error) {
+	err := validator.Validate(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API config: %w", err)
+	}
+
 	return &API{bookStorage: config.BookStorage}, nil
 }
 
@@ -29,14 +36,10 @@ func (api *API) GetHandler() http.Handler {
 	r.Get("/", api.serveHealthCheck)
 
 	r.Get("/books", api.serveGetBooks)
-
-	r.Get("/books/:id", api.serveGetBookByID)
-
+	r.Get("/books/{id}", api.serveGetBookByID)
 	r.Post("/books", api.serveCreateBook)
-
-	r.Put("/books/:id", api.serveUpdateBook)
-
-	r.Delete("/books/:id", api.serveDeleteBook)
+	r.Put("/books/{id}", api.serveUpdateBook)
+	r.Delete("/books/{id}", api.serveDeleteBook)
 
 	return r
 }
@@ -45,132 +48,197 @@ func (api *API) serveHealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("It's working!"))
 }
 
+// Path: GET `/books“
 func (api *API) serveGetBooks(w http.ResponseWriter, r *http.Request) {
-	books, err := api.bookStorage.GetBooks()
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+	// get query params (query, page, limit)
+	query := r.URL.Query().Get("query")
+
+	pageStr := r.URL.Query().Get("page")
+	if pageStr == "" {
+		pageStr = "1"
+	}
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrInvalidPage.Error()))
 		return
 	}
 
-	// output success response
-	buf := new(bytes.Buffer)
-	encoder := json.NewEncoder(buf)
-	encoder.Encode(utils.NewSuccessResp(books))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	w.Write(buf.Bytes())
+	limitStr := r.URL.Query().Get("limit")
+	if limitStr == "" {
+		limitStr = "10"
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 1 {
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrInvalidLimit.Error()))
+		return
+	}
+
+	// get books from storage
+	books, err := api.bookStorage.GetBooks(query, page, limit)
+	if err != nil {
+		render.Render(w, r, utils.NewErrorResp(http.StatusInternalServerError, err.Error()))
+		return
+	}
+
+	// return success response
+	render.Render(w, r, utils.NewSuccessResp(books))
 }
 
+type createBookReq struct {
+	ISBN      string `json:"isbn" validate:"nonzero"`
+	Title     string `json:"title" validate:"nonzero"`
+	Author    string `json:"author" validate:"nonzero"`
+	Published string `json:"published" validate:"nonzero"`
+}
+
+func (b *createBookReq) Bind(r *http.Request) error {
+	if b.ISBN == "" {
+		return ErrMissingISBN
+	}
+	if b.Title == "" {
+		return ErrMissingTitle
+	}
+	if b.Author == "" {
+		return ErrMissingAuthor
+	}
+	if b.Published == "" {
+		return ErrMissingPublished
+	}
+	return nil
+}
+
+// Path: GET `/books/{id}`
 func (api *API) serveGetBookByID(w http.ResponseWriter, r *http.Request) {
-	bookID := chi.URLParam(r, "id")
-
-	book, err := api.bookStorage.GetBookByID(bookID)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(err.Error()))
+	// get path params (id)
+	idStr := chi.URLParam(r, "id")
+	// validate path params (id)
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 1 {
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrInvalidID.Error()))
 		return
 	}
 
-	// Output success response with the book
-	buf := new(bytes.Buffer)
-	encoder := json.NewEncoder(buf)
-	encoder.Encode(utils.NewSuccessResp(book))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
+	// get book from storage
+	book, err := api.bookStorage.GetBookByID(idStr)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			render.Render(w, r, utils.NewErrorResp(http.StatusNotFound, ErrNotFoundBook.Error()))
+			return
+		}
+		render.Render(w, r, utils.NewErrorResp(http.StatusInternalServerError, err.Error()))
+		return
+	}
+
+	// return success response
+	render.Render(w, r, utils.NewSuccessResp(book))
 }
 
+// Path: POST `/books`
 func (api *API) serveCreateBook(w http.ResponseWriter, r *http.Request) {
-	// Parse the incoming request body
-	var newBook storage.Book
-	err := json.NewDecoder(r.Body).Decode(&newBook)
+	// get body request
+	bodyReq := &createBookReq{}
+	// validate body request
+	err := render.Bind(r, bodyReq)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, err.Error()))
 		return
 	}
 
-	// Generate a new ID for the book
-	newBook.ID = uuid.New().String()
-
-	// Add the new book to the storage
-	err = api.bookStorage.AddBook(newBook)
+	// create book
+	book := storage.Book{
+		ISBN:      bodyReq.ISBN,
+		Title:     bodyReq.Title,
+		Author:    bodyReq.Author,
+		Published: bodyReq.Published,
+	}
+	resBook, err := api.bookStorage.CreateBook(book)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+		render.Render(w, r, utils.NewErrorResp(http.StatusInternalServerError, err.Error()))
 		return
 	}
+	book.ID = resBook.ID
 
-	// Return success response with the created book
-	buf := new(bytes.Buffer)
-	encoder := json.NewEncoder(buf)
-	encoder.Encode(utils.NewSuccessResp(newBook))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	w.Write(buf.Bytes())
+	// return success response
+	render.Render(w, r, utils.NewSuccessResp(book))
 }
 
+type updateBookReq struct {
+	ISBN      string `json:"isbn"`
+	Title     string `json:"title"`
+	Author    string `json:"author"`
+	Published string `json:"published"`
+}
+
+func (b *updateBookReq) Bind(r *http.Request) error {
+	if b.ISBN == "" && b.Title == "" && b.Author == "" && b.Published == "" {
+		return ErrMissingUpdateData
+	}
+	return nil
+}
+
+// Path: PUT `/books/{id}`
 func (api *API) serveUpdateBook(w http.ResponseWriter, r *http.Request) {
-	bookID := chi.URLParam(r, "id")
-
-	// Parse the request body
-	updateRequest := &storage.Book{}
-	if err := json.NewDecoder(r.Body).Decode(updateRequest); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+	// get path params (id)
+	idStr := chi.URLParam(r, "id")
+	// validate path params (id)
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 1 {
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrInvalidID.Error()))
 		return
 	}
 
-	// Retrieve the book from storage
-	book, err := api.bookStorage.GetBookByID(bookID)
+	// get body request
+	bodyReq := &updateBookReq{}
+	// validate body request
+	err = render.Bind(r, bodyReq)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(err.Error()))
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrMissingUpdateData.Error()))
 		return
 	}
 
-	// Update the book fields if the corresponding fields in the update request are not empty
-	if updateRequest.ISBN != "" {
-		book.ISBN = updateRequest.ISBN
+	// update book from storage
+	book := &storage.Book{
+		ISBN:      bodyReq.ISBN,
+		Title:     bodyReq.Title,
+		Author:    bodyReq.Author,
+		Published: bodyReq.Published,
 	}
-	if updateRequest.Title != "" {
-		book.Title = updateRequest.Title
-	}
-	if updateRequest.Author != "" {
-		book.Author = updateRequest.Author
-	}
-	if updateRequest.Published != "" {
-		book.Published = updateRequest.Published
-	}
-
-	// Update the book in storage
-	// (assuming you have a method `UpdateBookByID` in the `storage` package)
-	err = api.bookStorage.UpdateBookByID(bookID, book)
+	book, err = api.bookStorage.UpdateBook(idStr, *book)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
+		if strings.Contains(err.Error(), "not found") {
+			render.Render(w, r, utils.NewErrorResp(http.StatusNotFound, ErrNotFoundBook.Error()))
+			return
+		}
+		render.Render(w, r, utils.NewErrorResp(http.StatusInternalServerError, err.Error()))
 		return
 	}
 
-	// Output success response
-	buf := new(bytes.Buffer)
-	encoder := json.NewEncoder(buf)
-	encoder.Encode(utils.NewSuccessResp(book))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
+	// return success response
+	render.Render(w, r, utils.NewSuccessResp(book))
 }
 
+// Path: DELETE `/books/{id}`
 func (api *API) serveDeleteBook(w http.ResponseWriter, r *http.Request) {
-	bookID := chi.URLParam(r, "id")
-
-	err := api.bookStorage.DeleteBookByID(bookID)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(err.Error()))
+	// get path params (id)
+	idStr := chi.URLParam(r, "id")
+	// validate path params (id)
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id < 1 {
+		render.Render(w, r, utils.NewErrorResp(http.StatusBadRequest, ErrInvalidID.Error()))
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	// delete book from storage
+	err = api.bookStorage.DeleteBook(idStr)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			render.Render(w, r, utils.NewErrorResp(http.StatusNotFound, ErrNotFoundBook.Error()))
+			return
+		}
+		render.Render(w, r, utils.NewErrorResp(http.StatusInternalServerError, err.Error()))
+		return
+	}
+
+	// return success response
+	render.Render(w, r, utils.NewSuccessResp(nil))
 }
